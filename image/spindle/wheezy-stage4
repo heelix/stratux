@@ -12,17 +12,28 @@ OUTDIR=out
 CURIMG=stage4.$IMGFORMAT
 
 
+setup_stratux_bootconfig() {
+	dotask attach_image_to_nbd $CURIMG $NBD_DEV
+	mkdir boot
+	dotask sudo mount $BOOT_DEV boot
+	#usb power
+	echo "max_usb_current=1" >>boot/config.txt
+	#i2c
+	echo "dtparam=i2c1=on" >>boot/config.txt
+}
+
 setup_stratux() {
 #HERE
 
 echo "**** STRATUX SETUP *****"
 
-#general
   ssh_in_to_qemu chroot /mnt sh -l -ex - <<\EOF
 #general
 apt-get install -y screen
 #wifi
 apt-get install -y hostapd isc-dhcp-server
+#troubleshooting
+apt-get install -y tcpdump
 #wifi startup
 update-rc.d hostapd enable
 update-rc.d isc-dhcp-server enable
@@ -59,15 +70,21 @@ echo blacklist dvb_usb_rtl28xxu >>/etc/modprobe.d/rtl-sdr-blacklist.conf
 echo blacklist e4000 >>/etc/modprobe.d/rtl-sdr-blacklist.conf
 echo blacklist rtl2832 >>/etc/modprobe.d/rtl-sdr-blacklist.conf
 
+
+echo "# prevent power down of wireless when idle" >>/etc/modprobe.d/8192cu.conf
+echo "options 8192cu rtw_power_mgnt=0 rtw_enusbss=0" >>/etc/modprobe.d/8192cu.conf
+
 EOF
 
 echo "*** STRATUX COMPILE/PACKAGE INSTALL ***"
 echo " - RTL-SDR tools"
+
   ssh_in_to_qemu chroot /mnt sh -l -ex - <<\EOF
 apt-get install -y git cmake libusb-1.0-0.dev build-essential
 
 
 cd /root
+rm -rf rtl-sdr
 git clone git://git.osmocom.org/rtl-sdr.git
 cd rtl-sdr
 mkdir build
@@ -89,18 +106,24 @@ cp dump1090 /usr/bin/
 EOF
 
 echo " - Stratux"
+
+scp_in_to_qemu /root/spindle/gen_gdl90 /tmp/gen_gdl90
+
   ssh_in_to_qemu chroot /mnt sh -l -ex - <<\EOF
-apt-get install -y golang-go
 cd /root
+
 rm -rf stratux
 git clone https://github.com/cyoung/stratux
 cd stratux
+mkdir -p /var/www
+cp -r web/* /var/www/
 cd dump978
 make
 cp dump978 /usr/bin/
 cd ..
-go build gen_gdl90.go
-cp gen_gdl90 /usr/bin/
+
+mv /tmp/gen_gdl90 /usr/bin/gen_gdl90
+chmod +x /usr/bin/gen_gdl90
 cp start_uat.sh /usr/bin/start_uat
 cp init.d-stratux /etc/init.d/stratux
 cp start_stratux.sh /usr/sbin/stratux
@@ -109,7 +132,15 @@ chmod 755 /usr/sbin/stratux
 chmod 755 /etc/init.d/stratux
 ln -s /etc/init.d/stratux /etc/rc2.d/S01stratux
 ln -s /etc/init.d/stratux /etc/rc6.d/K01stratux
+
 update-rc.d stratux enable
+
+
+#i2c
+echo "i2c-bcm2708" >>/etc/modules
+echo "i2c-dev" >>/etc/modules
+
+
 EOF
 
 echo "**** END STRATUX SETUP *****"
@@ -121,13 +152,25 @@ echo "**** END STRATUX SETUP *****"
 
 cd $WORKDIR
 dotask branch_image ../$OUTDIR/stage3.$IMGFORMAT $CURIMG
+
+
 dotask run_qemu $CURIMG
 dotask mount_apt_cache
 dotask disable_starting_services
+
+
 dotask setup_stratux
+
+
 dotask save_space_using_hardlink
 dotask allow_starting_services
 dotask update_issue
 dotask fingerprint_debian
 dotask shutdown_qemu
+
+
+dotask setup_stratux_bootconfig
+universal_cleanup
+
+
 dotask finish_image
